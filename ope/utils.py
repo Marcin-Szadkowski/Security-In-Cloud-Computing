@@ -24,20 +24,17 @@ class Polynomial:
         return item in self.coefficients
 
 
-def lagrangian_interpolation_list(x, abscissa_ordinate_list):
-    abscissas = [el[0] for el in abscissa_ordinate_list]
+def lagrangian_interpolation(x, known_x_y):
+    abscissas = [el[0] for el in known_x_y]
     seen = []
     for abscissa in abscissas:
         if abscissa not in seen:
             seen.append(abscissa)
 
-    assert len(seen) == len(
-        abscissas
-    ), "There are recurring abscissas in Interpolation set."
     main_sum = get_Fr(0)
-    for i, (x_i, ordinate_i) in enumerate(abscissa_ordinate_list):
+    for i, (x_i, ordinate_i) in enumerate(known_x_y):
         exp_product_i = get_Fr(1)
-        for j, (x_j, _) in enumerate(abscissa_ordinate_list):
+        for j, (x_j, _) in enumerate(known_x_y):
             if i == j:
                 continue
             exp_product_i *= (x - x_j) / (x_i - x_j)

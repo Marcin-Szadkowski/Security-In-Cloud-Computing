@@ -1,3 +1,4 @@
+import logging
 import random
 
 from common_protocol import Responder, jload, jstore
@@ -7,12 +8,15 @@ from utils import (
     Polynomial,
     get_Fr,
     get_G1,
-    lagrangian_interpolation_list,
+    lagrangian_interpolation,
     my_hash,
     xor,
 )
 
 GROUP = G1
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("Receiver")
 
 
 class Receiver(Responder):
@@ -28,7 +32,7 @@ class Receiver(Responder):
         self.S = Polynomial(degree=self.k, coefficient_0_0=self.alpha)  # S(0) = alpha
         self.dr = dr  # degree of polynomial R
 
-        self.T = []
+        self.T = []  # subset of indices
         self.interpolation_pairs = []
         self.xs = [
             get_Fr() for _ in range(self.n * self.m)
@@ -46,8 +50,7 @@ class Receiver(Responder):
             else:
                 x = self.xs[ind]
                 commitment_pairs[ind] = (x, get_Fr())
-        print(f"{T=}")
-        assert len(T) == self.n, "Wrong indexes (self.I) length."
+
         return commitment_pairs
 
     def _get_subset_of_indices(self) -> list:
@@ -59,13 +62,36 @@ class Receiver(Responder):
                 self.T.append(rand_ind)
         return self.T
 
-    def set_Rs(self, Rs: list[GROUP]):
+    def interpolate_polynomial_R(self):
+        """We use values of R that we learned to interpolate R(0) = P(alpha)"""
+        result = lagrangian_interpolation(
+            x=get_Fr(value=0), known_x_y=self.interpolation_pairs
+        )
+        return result
+
+
+class OtReceiver:
+    def __init__(self, ope_receiver: Receiver) -> None:
+        self.ope_receiver = ope_receiver
+
+    def receive_R(self):
+        Rs_ = self.ope_receiver.receive_message()
+        Rs = jload({"Rs": [GROUP]}, Rs_, True)["Rs"]
         self.Rs = Rs
 
-    def set_Cs(self, Cs: list[str]):
+    def _set_Cs(self, Cs: list[str]):
         self.Cs = Cs
 
-    def produce_W(self, j: int):
+    def send_W(self, idx):
+        W = self._produce_W(j=idx)
+        self.ope_receiver.send_message(jstore({"W": W}))
+
+    def receive_C(self):
+        Cs_ = self.ope_receiver.receive_message()
+        Cs = jload({"Cs": [str]}, Cs_, True)["Cs"]
+        self._set_Cs(Cs=Cs)
+
+    def _produce_W(self, j: int):
         self.rand_exp = get_Fr()
         R = self.Rs[j]
         self.W = R * self.rand_exp
@@ -75,7 +101,7 @@ class Receiver(Responder):
     def produce_message(self, j: int):
         C = self.Cs[j]
         hash_obj = None
-        g_a_bytes = str(self.g * self.rand_exp).encode()
+        g_a_bytes = str(self.ope_receiver.g * self.rand_exp).encode()
         hash_obj = my_hash(g_a_bytes)
 
         h_g_bytes = hash_obj
@@ -84,15 +110,6 @@ class Receiver(Responder):
         m = Fr()
         m.deserialize(m_bytes)
         return m
-
-    def append_interpolation_pair(self, interpolation_pair):
-        self.interpolation_pairs.append(interpolation_pair)
-
-    def interpolate_polynomial_P(self):
-        value = lagrangian_interpolation_list(
-            x=get_Fr(value=0), abscissa_ordinate_list=self.interpolation_pairs
-        )
-        print(f"P(alpha)= {value}")
 
 
 def main():
@@ -103,7 +120,9 @@ def main():
     k = 20
     dr = n - 1
     alpha = 10
-    g = get_G1(value=b"genQ")
+    g = get_G1(value=b"seed")
+
+    logger.info("Staring Receiver...")
     receiver = Receiver(
         k=k,
         n=n,
@@ -116,24 +135,26 @@ def main():
     )
 
     commitment_pairs = receiver.produce_commitment_pairs()
+    # # Send pairs <xi, S(x)> or <xi, random from field> if i not in T
     receiver.send_message(jstore({"S": commitment_pairs}))
 
-    for i, ind in enumerate(receiver.T):
-        print(f"Doing {i} OT.")
-        Rs_ = receiver.receive_message()
-        Rs = jload({"Rs": [GROUP]}, Rs_, True)["Rs"]
-        receiver.set_Rs(Rs=Rs)
+    ot_receiver = OtReceiver(ope_receiver=receiver)
 
-        W = receiver.produce_W(j=ind)
-        receiver.send_message(jstore({"W": W}))
+    # # Perform n times OT
+    logger.info("Performing OT...")
+    for i, idx in enumerate(receiver.T):
+        logger.debug(f"{i}/{len(receiver.T)} OT")
+        ot_receiver.receive_R()
 
-        Cs_ = receiver.receive_message()
-        Cs = jload({"Cs": [str]}, Cs_, True)["Cs"]
-        receiver.set_Cs(Cs=Cs)
+        ot_receiver.send_W(idx)
 
-        interpolation_ordinate = receiver.produce_message(j=ind)
-        receiver.append_interpolation_pair((receiver.xs[ind], interpolation_ordinate))
-    receiver.interpolate_polynomial_P()
+        ot_receiver.receive_C()
+
+        Q_result = ot_receiver.produce_message(j=idx)
+        receiver.interpolation_pairs.append((receiver.xs[idx], Q_result))
+
+    result = receiver.interpolate_polynomial_R()
+    logger.info(f"Got P(alpha) = {result}")
 
 
 if __name__ == "__main__":
